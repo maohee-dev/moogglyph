@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASCII Art Orchestra (Moog Edition)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0a0a1a;
+            font-family: "Inter", sans-serif;
+            color: white;
+        }
+        #drawing-area {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            cursor: crosshair;
+        }
+        .character-particle {
+            position: absolute;
+            user-select: none;
+            pointer-events: none;
+            /* Massively increased font size */
+            font-size: 80px; 
+            font-weight: bold;
+            will-change: transform, opacity;
+            text-shadow: 0 0 15px rgba(255, 255, 255, 0.3);
+        }
+        .message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
+            z-index: 1002;
+            text-align: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease-in-out, visibility 0.3s ease-in-out;
+        }
+        .message-box.show {
+            opacity: 1;
+            visibility: visible;
+        }
+    </style>
+</head>
+<body>
+    <div id="drawing-area"></div>
+    <div id="messageBox" class="message-box"></div>
+
+    <script>
+        // --- DOM Elements ---
+        const drawingArea = document.getElementById('drawing-area');
+        const messageBox = document.getElementById('messageBox');
+
+        // --- Character Palette ---
+        const characterSet = "█ ▓ ▒ ░ ▀ ▄ ▌ ▐ ◆ ◇ ◈ ◎ ● ◐ ◑ ◒ ◓ ◢ ◣ ◤ ◥ ★ ☆ ☉ ☿ ♀ ♁ ♂ ♃ ♄ ♅ ♆ ♇ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ ♔ ♕ ♖ ♗ ♘ ♙ ☮ ☯ ☸ ☹ ☺ ☻ ☼ ☽ ☾ ♠ ♡ ♢ ♣ ᚠ ᚡ ᚢ ᚣ ᚤ ᚥ ᚦ ᚧ ⠁ ⠂ ⠃ ⠄ ⠅ ⠆ ⠇ ☰ ☱ ☲ ☳ ☴ ☵ ☶ ☷ ╱ ╲ ╳ ╴ ╵ ╶ ╷ ╸ ╹ ╺ ╻ ╼ ╽ ╾ ╿".split(' ').filter(c => c.trim() !== '');
+        let activeChars = [];
+
+        // --- Mouse/Touch state variables ---
+        let isDrawing = false;
+        let mouseX = 0, mouseY = 0;
+        
+        // --- Tone.js Audio Engine Variables ---
+        let toneInitialized = false;
+        let padSynth, arpSynth, arpSequence, bassSynth, melodySynth, melodySequence;
+        let symbolSynth, accentSynths = [], accentSynthIndex = 0;
+        let noteScale = [];
+        let masterReverb, masterFilter;
+        let currentChordIndex = 0;
+        const chordProgression = [
+            { chord: ["A2", "C3", "E3", "G3"], scale: ["A3", "C4", "D4", "E4", "G4", "A4"] },
+            { chord: ["G2", "B2", "D3", "F#3"], scale: ["G3", "A3", "B3", "D4", "E4", "G4"] },
+            { chord: ["C3", "E3", "G3", "B3"], scale: ["C4", "D4", "E4", "G4", "A4", "C5"] },
+            { chord: ["F2", "A2", "C3", "E3"], scale: ["F3", "G3", "A3", "C4", "D4", "F4"] }
+        ];
+
+        // --- Initialization ---
+        function init() {
+            drawingArea.addEventListener('mousedown', onPointerDown);
+            drawingArea.addEventListener('mousemove', onPointerMove);
+            window.addEventListener('mouseup', onPointerUp);
+        }
+
+        // --- Event Handlers ---
+        async function onPointerDown(event) {
+            isDrawing = true;
+            if (!toneInitialized) {
+                await initTone();
+                toneInitialized = true;
+                showMessage("The analog orchestra is warming up...", 3000);
+            }
+            updateMousePosition(event);
+        }
+
+        function onPointerMove(event) {
+            if (!isDrawing) return;
+            updateMousePosition(event);
+            
+            // Performance Optimization: Create fewer particles, especially on fast movements.
+            const numToCreate = Math.min(4, Math.floor(Math.abs(event.movementX) / 10) + 1);
+            for (let i = 0; i < numToCreate; i++) {
+                addCharacterParticle();
+            }
+
+            if (toneInitialized) {
+                const filterFreq = 100 + Math.pow((mouseY / window.innerHeight), 2) * 8000;
+                masterFilter.frequency.rampTo(filterFreq, 0.1);
+                melodySynth.filterEnvelope.baseFrequency = filterFreq;
+            }
+        }
+
+        function onPointerUp() {
+            isDrawing = false;
+        }
+
+        // --- Helper Functions ---
+        function updateMousePosition(event) {
+            mouseX = event.clientX;
+            mouseY = event.clientY;
+        }
+
+        function addCharacterParticle() {
+            // Draw a completely random symbol each time
+            const charIndex = Math.floor(Math.random() * characterSet.length);
+            const charToDraw = characterSet[charIndex];
+
+            // Increased base scale and dramatic boost for accents
+            let initialScale = 1 + Math.random() * 2; 
+
+            if (toneInitialized) {
+                const note = noteScale[charIndex % noteScale.length];
+                symbolSynth.triggerAttackRelease(note, "32n", Tone.now());
+                const octave = parseInt(note.replace(/[^0-9]/g, ''), 10);
+                if (octave >= 6 || octave <= 2) { // Adjusted octave check
+                    initialScale += 3 + Math.random() * 2; // Even bigger boost
+                    accentSynths[accentSynthIndex].triggerAttackRelease("32n", Tone.now());
+                    accentSynthIndex = (accentSynthIndex + 1) % accentSynths.length;
+                }
+            }
+            
+            const charEl = document.createElement('div');
+            charEl.className = 'character-particle';
+            charEl.textContent = charToDraw;
+            const life = 150 + Math.random() * 150; // Slightly longer life
+            const vx = (Math.random() - 0.5) * 6;
+            const vy = (Math.random() - 0.5) * 6;
+            
+            charEl.style.left = `${mouseX}px`;
+            charEl.style.top = `${mouseY}px`;
+            charEl.style.color = `hsl(${Math.random() * 360}, 90%, 75%)`;
+            charEl.style.transform = `scale(${initialScale})`;
+            drawingArea.appendChild(charEl);
+
+            activeChars.push({ element: charEl, x: mouseX, y: mouseY, vx: vx, vy: vy, life: life, maxLife: life, initialScale: initialScale });
+        }
+
+        // --- Animation Loop ---
+        function animate() {
+            activeChars = activeChars.filter(p => {
+                p.life--;
+                if (p.life <= 0) {
+                    p.element.remove();
+                    return false;
+                }
+                p.x += p.vx;
+                p.y += p.vy;
+                p.vx *= 0.98;
+                p.vy *= 0.98;
+                const lifeRatio = p.life / p.maxLife;
+                const currentScale = p.initialScale * lifeRatio;
+                p.element.style.transform = `translate(${p.x - mouseX}px, ${p.y - mouseY}px) scale(${currentScale})`;
+                p.element.style.opacity = lifeRatio;
+                return true;
+            });
+            requestAnimationFrame(animate);
+        }
+
+        // --- Generative Audio Engine ---
+        async function initTone() {
+            await Tone.start();
+            console.log("Tone.js context started.");
+
+            const scaleNotes = ["C", "D", "E", "G", "A"];
+            for (let octave = 2; octave < 8; octave++) { // Expanded octave range
+                for (const note of scaleNotes) {
+                    noteScale.push(`${note}${octave}`);
+                }
+            }
+
+            masterReverb = new Tone.Reverb({ decay: 8, wet: 0.4, preDelay: 0.1 }).toDestination();
+            masterFilter = new Tone.Filter(400, "lowpass").connect(masterReverb);
+            masterFilter.Q.value = 6;
+
+            padSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "fatsawtooth", count: 3, spread: 30 },
+                envelope: { attack: 4, decay: 0.1, sustain: 1, release: 7 }
+            }).connect(masterFilter);
+            padSynth.volume.value = -24; // Reduced gain
+
+            arpSynth = new Tone.Synth({
+                oscillator: { type: "square" },
+                envelope: { attack: 0.01, decay: 0.3, sustain: 0, release: 0.3 }
+            }).connect(masterFilter);
+            arpSynth.volume.value = -30; // Reduced gain
+
+            bassSynth = new Tone.MonoSynth({
+                oscillator: { type: "sawtooth" },
+                envelope: { attack: 5, decay: 0, sustain: 1, release: 5 }
+            }).connect(masterFilter);
+            bassSynth.volume.value = -22; // Reduced gain
+
+            melodySynth = new Tone.MonoSynth({
+                oscillator: { type: "sawtooth" },
+                filter: { type: "lowpass", Q: 2 },
+                envelope: { attack: 0.1, decay: 0.5, sustain: 0.2, release: 2 },
+                filterEnvelope: { attack: 0.05, decay: 0.2, sustain: 0.1, release: 1, baseFrequency: 200, octaves: 4 }
+            }).connect(masterFilter);
+            melodySynth.volume.value = -18; // Reduced gain
+
+            symbolSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: 'triangle' },
+                envelope: { attack: 0.005, decay: 0.1, sustain: 0, release: 0.1 }
+            }).connect(masterFilter);
+            symbolSynth.volume.value = -21; // Reduced gain
+            
+            const accentSynthPoolSize = 10;
+            for (let i = 0; i < accentSynthPoolSize; i++) {
+                const accentSynth = new Tone.NoiseSynth({
+                    noise: { type: 'white' },
+                    envelope: { attack: 0.005, decay: 0.05, sustain: 0 }
+                }).connect(masterFilter);
+                accentSynth.volume.value = -26; // Reduced gain
+                accentSynths.push(accentSynth);
+            }
+
+            // FIX: Restore the missing sequence definitions
+            arpSequence = new Tone.Sequence((time, note) => {
+                arpSynth.triggerAttackRelease(note, "16n", time);
+            }, [], "8n").start(0);
+
+            melodySequence = new Tone.Sequence((time, note) => {
+                melodySynth.triggerAttackRelease(note, "2n", time);
+            }, [], "1m").start("1m");
+
+            new Tone.Loop(time => {
+                const current = chordProgression[currentChordIndex];
+                padSynth.triggerAttackRelease(current.chord, "4m", time);
+                bassSynth.triggerAttackRelease(current.chord[0], "4m", time);
+                arpSequence.events = current.chord;
+                const melNotes = [current.scale[Math.floor(Math.random() * current.scale.length)], current.scale[Math.floor(Math.random() * current.scale.length)]];
+                melodySequence.events = melNotes;
+                currentChordIndex = (currentChordIndex + 1) % chordProgression.length;
+            }, "4m").start(0);
+            Tone.Transport.bpm.value = 60;
+            Tone.Transport.start();
+        }
+
+        // --- UI Functions ---
+        function showMessage(message, duration = 0) {
+            messageBox.textContent = message;
+            messageBox.classList.add('show');
+            if (duration > 0) {
+                setTimeout(() => {
+                    messageBox.classList.remove('show');
+                }, duration);
+            }
+        }
+
+        // --- Entry Point ---
+        window.onload = function () {
+            init();
+            showMessage("Draw anywhere to begin.", 5000);
+        };
+    </script>
+</body>
+</html>
